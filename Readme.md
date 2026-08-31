@@ -1,6 +1,7 @@
-# AI Multi-Agent PR Reviewer (CodeRabbit-style)
+# AI Multi-Agent PR Reviewer
 
-A GitHub Actions workflow that automatically reviews every pull request using free-tier LLMs and posts a CodeRabbit-style review as a single, self-updating comment — including a walkthrough summary, per-file changes table, a Mermaid sequence diagram, severity-ranked security findings with suggested fixes, and test suggestions.
+A GitHub Actions workflow that automatically reviews every pull request using free-tier LLMs and posts a
+review as a single, self-updating comment — including a walkthrough summary, per-file changes table, a Mermaid sequence diagram, severity-ranked security findings with suggested fixes, and test suggestions.
 
 **Cost: $0.** Runs on Groq's free tier, with automatic failover to OpenRouter's free router if Groq is rate-limited.
 
@@ -139,7 +140,7 @@ If you outgrow the free tiers, in rough order of bang-for-buck:
 
 1. **Groq Developer tier** — free to enable (just add a card), 10× the rate limits. Fixes most rate-limit pain.
 2. **Pin a stronger paid model** — replace `openrouter/free` with a specific cheap model on OpenRouter; a typical PR review costs fractions of a cent and quality/diagram reliability improves noticeably.
-3. **Inline line-level comments** — the current version posts one summary comment. True CodeRabbit-style inline comments require structured JSON output mapped to diff positions via GitHub's Reviews API — a natural v2.
+3. **Inline line-level comments** — the current version posts one summary comment. Inline comments require structured JSON output mapped to diff positions via GitHub's Reviews API — a natural v2.
 
 ## Limitations
 

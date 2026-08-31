@@ -1,4 +1,4 @@
-name: AI Multi-Agent PR Reviewer (CodeRabbit-style)
+name: AI Multi-Agent PR Reviewer
 
 # SECURITY MODEL — read before modifying:
 # - Trigger is `pull_request` (NOT `pull_request_target`). On PRs from forks,
@@ -170,7 +170,7 @@ jobs:
           // Untrusted content is fenced in tags and declared as data.
           // ------------------------------------------------------------------
           const systemPrompt = [
-            "You are an expert AI code reviewer producing reviews in the exact style of CodeRabbit.",
+            "You are an expert AI code reviewer producing reviews.",
             "You are precise, actionable, and never generic. You only flag real issues visible in the diff — never invent problems.",
             "Severity levels: 🔴 Critical, 🟠 Major, 🟡 Minor, 🔵 Nitpick.",
             "",
@@ -191,9 +191,13 @@ jobs:
 
           A Markdown table with columns: File | Change Summary. One row per changed file (group similar files).
 
-          ## 📊 Sequence Diagram
+          ## 📊 Flow Diagram (CONDITIONAL — include only when applicable)
 
-          A Mermaid diagram (fenced \`\`\`mermaid block) of the most important flow introduced or changed. Prefer sequenceDiagram for request/data flows, flowchart TD for logic changes. Under 15 nodes. If changes are trivial, write "No diagram needed for these changes." instead.
+          Include this section ONLY if the diff introduces or changes an actual flow, such as: authentication/authorization, page or route navigation, request/response lifecycles, API call sequences, data pipelines, state machines, event handling chains, or multi-step user journeys.
+
+          If the changes are anything else (styling, refactors, config, docs, dependency bumps, isolated utility functions, test-only changes), OMIT this section entirely — do not write the header, do not write "No diagram needed", just skip straight from Changes to Findings.
+
+          When included: a Mermaid diagram (fenced \`\`\`mermaid block). Use sequenceDiagram for auth/request/data flows, flowchart TD for navigation and branching logic. Under 15 nodes. The diagram must reflect the flow as changed by this PR, not the codebase in general.
 
           ## 🛡️ Security & Code Quality Findings
 
