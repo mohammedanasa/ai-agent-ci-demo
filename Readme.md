@@ -1,7 +1,6 @@
 # AI Multi-Agent PR Reviewer
 
-A GitHub Actions workflow that automatically reviews every pull request using free-tier LLMs and posts a
-review as a single, self-updating comment — including a walkthrough summary, per-file changes table, a Mermaid sequence diagram, severity-ranked security findings with suggested fixes, and test suggestions.
+A GitHub Actions workflow that automatically reviews every pull request using free-tier LLMs and posts a review as a single, self-updating comment — including a walkthrough summary, per-file changes table, a Mermaid sequence diagram, severity-ranked security findings with suggested fixes, and test suggestions.
 
 **Cost: $0.** Runs on Groq's free tier, with automatic failover to OpenRouter's free router if Groq is rate-limited.
 
@@ -13,8 +12,10 @@ Every PR gets one sticky comment (updated in place on each push, never spammed) 
 |---|---|
 | 📝 Walkthrough | 2–4 sentence summary of what the PR does |
 | 🔄 Changes | Table of changed files with summaries |
-| 📊 Sequence Diagram | Mermaid diagram of the changed flow (GitHub renders it natively) |
-| 🛡️ Findings | Issues ranked 🔴 Critical → 🟠 Major → 🟡 Minor → 🔵 Nitpick, each with file, explanation, and fixed code |
+| 📊 Flow Diagram | Mermaid diagram, only when the PR changes an actual flow (auth, navigation, request lifecycles) |
+| 🛡️ Findings | Issues ranked 🔴 Critical → 🟠 Major → 🟡 Minor → 🔵 Nitpick, each with file, category, explanation, fixed code, and a collapsible **🤖 Prompt for AI agents** — a self-contained fix instruction you copy-paste into Claude Code, Cursor, Copilot, etc. (the code block has GitHub's native copy button) |
+| 💡 Code Improvements | Up to 3 optional refactors (non-defects), each with its own agent prompt; omitted when none |
+| 📋 All fixes | One combined, numbered agent prompt to delegate every fix in a single paste; appears when there are 2+ fixes |
 | 🧪 Suggested Tests | Concrete test cases with snippets |
 | ✅ Review Summary | One-line verdict + severity counts |
 
@@ -74,10 +75,17 @@ Skip if draft or bot-authored ── cancel any superseded run for the same PR
       │
       ▼
 Collect diff vs base branch
-(lockfiles, dist/, binaries excluded; packed per-file into a ~6K-token budget)
+(lockfiles, dist/, binaries excluded; packed per-file into a ~5K-token budget)
       │
       ▼
-Call AI with failover chain:
+Static analysis (never blocks the review):
+  · Gitleaks — secrets scan on the new commits (secret VALUES stripped
+    before anything leaves the runner)
+  · Semgrep — security rules (p/security-audit + p/owasp-top-ten)
+    on changed files
+      │
+      ▼
+Call AI with failover chain (scanner findings included as verified hints):
   1. Groq · llama-3.3-70b-versatile
   2. Groq · llama-3.1-8b-instant
   3. OpenRouter · openrouter/free
@@ -98,10 +106,12 @@ All knobs live near the top of the embedded script in the workflow file:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `MAX_DIFF_CHARS` | `24000` | Diff budget (~6K tokens). Sized to fit Groq's 12K tokens/min free-tier window. Overridable via env var. |
+| `MAX_DIFF_CHARS` | `18000` | Diff budget (~4.5K tokens). Sized with the SAST block and agent prompts to fit Groq's 12K tokens/min free-tier window. Overridable via env var. |
+| `MAX_SAST_CHARS` | `4000` | Cap on scanner findings included in the prompt |
 | `MAX_PR_TITLE_CHARS` | `200` | PR title cap before embedding in the prompt |
 | `MAX_PR_BODY_CHARS` | `1000` | PR description cap |
-| `MAX_OUTPUT_TOKENS` | `3500` | Completion budget for the review |
+| `MAX_OUTPUT_TOKENS` | `4000` | Completion budget for the review (raised to fund the per-finding agent prompts) |
+| Semgrep rulesets | `p/security-audit`, `p/owasp-top-ten` | Edit in the "Static Analysis" step; add language packs (e.g. `p/javascript`) as needed |
 | `PROVIDERS` array | Groq 70B → Groq 8B → OpenRouter | Failover order. Remove the 8B entry if its review quality bothers you. |
 | Excluded paths | lockfiles, `dist/`, `build/`, `node_modules/`, minified/binary files | Edit the `git diff` exclusions in the "Collect PR Context" step |
 
@@ -140,7 +150,7 @@ If you outgrow the free tiers, in rough order of bang-for-buck:
 
 1. **Groq Developer tier** — free to enable (just add a card), 10× the rate limits. Fixes most rate-limit pain.
 2. **Pin a stronger paid model** — replace `openrouter/free` with a specific cheap model on OpenRouter; a typical PR review costs fractions of a cent and quality/diagram reliability improves noticeably.
-3. **Inline line-level comments** — the current version posts one summary comment. Inline comments require structured JSON output mapped to diff positions via GitHub's Reviews API — a natural v2.
+3. **Inline line-level comments** — the current version posts one summary comment. True inline comments require structured JSON output mapped to diff positions via GitHub's Reviews API — a natural v2.
 
 ## Limitations
 
