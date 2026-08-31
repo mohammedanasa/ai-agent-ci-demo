@@ -1,12 +1,20 @@
-name: AI Multi-Agent PR Reviewer
+name: AI Multi-Agent PR Reviewer (CodeRabbit-style)
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, reopened]
+
+# Cancel superseded runs when new commits are pushed to the same PR
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   ai-review:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Skip draft PRs and bot-authored PRs (avoids review loops)
+    if: ${{ !github.event.pull_request.draft && github.event.pull_request.user.type != 'Bot' }}
     permissions:
       contents: read
       pull-requests: write
@@ -22,94 +30,237 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Get PR Diff
-        id: get_diff
+      - name: Collect PR Context
+        id: context
         run: |
-          git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt
-          echo "DIFF_EXISTS=$(if [ -s pr_diff.txt ]; then echo 'true'; else echo 'false'; fi)" >> $GITHUB_ENV
+          BASE="origin/${{ github.base_ref }}"
 
-      - name: Run OpenRouter Multi-Agent Review
-        if: env.DIFF_EXISTS == 'true'
-        env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO_NAME: ${{ github.repository }}
+          # Diff, excluding noise files (lockfiles, build output, vendored deps, binaries)
+          git diff "$BASE"...HEAD -- . \
+            ':(exclude)package-lock.json' \
+            ':(exclude)yarn.lock' \
+            ':(exclude)pnpm-lock.yaml' \
+            ':(exclude)poetry.lock' \
+            ':(exclude)Cargo.lock' \
+            ':(exclude)go.sum' \
+            ':(exclude)dist/**' \
+            ':(exclude)build/**' \
+            ':(exclude)node_modules/**' \
+            ':(exclude)*.min.js' \
+            ':(exclude)*.map' \
+            ':(exclude)*.svg' \
+            ':(exclude)*.png' \
+            ':(exclude)*.jpg' \
+            > pr_diff.txt
+
+          # Per-file change stats for the walkthrough table
+          git diff --stat "$BASE"...HEAD > pr_stats.txt
+          git diff --name-status "$BASE"...HEAD > pr_files.txt
+
+          if [ -s pr_diff.txt ]; then
+            echo "diff_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "diff_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Script is written to disk first to avoid shell-quoting issues
+      - name: Write review script
+        if: steps.context.outputs.diff_exists == 'true'
         run: |
-          node -e '
-          const fs = require("fs");
-          const https = require("https");
+          cat > review.mjs << 'EOF'
+          import fs from "node:fs";
 
-          const diff = fs.readFileSync("pr_diff.txt", "utf8").slice(0, 8000);
+          const MAX_DIFF_CHARS = 60000; // ~15k tokens; chunk instead of blindly truncating
+          const rawDiff = fs.readFileSync("pr_diff.txt", "utf8");
+          const stats = fs.readFileSync("pr_stats.txt", "utf8");
+          const files = fs.readFileSync("pr_files.txt", "utf8");
 
-          const promptText = `You are a Senior Software Developer acting as a 2-agent review team:
+          // --- Split the diff into per-file chunks so truncation never cuts mid-hunk ---
+          function splitDiffByFile(diff) {
+            const parts = diff.split(/^(?=diff --git )/m).filter(Boolean);
+            return parts;
+          }
 
-          AGENT 1 (Security & Logic Reviewer): Analyze this code diff for security flaws, bugs, and performance issues.
-          AGENT 2 (Test Engineer): Identify missing edge cases and write unit test suggestions for these changes.
+          function packDiff(diff, budget) {
+            const chunks = splitDiffByFile(diff);
+            let out = "";
+            let skipped = [];
+            for (const chunk of chunks) {
+              if (out.length + chunk.length <= budget) {
+                out += chunk;
+              } else {
+                const nameMatch = chunk.match(/^diff --git a\/(\S+)/);
+                skipped.push(nameMatch ? nameMatch[1] : "unknown file");
+              }
+            }
+            if (skipped.length) {
+              out += `\n\n[NOTE: ${skipped.length} file(s) omitted due to size: ${skipped.join(", ")}. Mention in your summary that these were not reviewed.]`;
+            }
+            return out;
+          }
 
-          Format your output strictly in clean Markdown with these headers:
-          ## 🛡️ Agent 1: Security & Code Quality Audit
-          ## 🧪 Agent 2: Suggested Unit Tests
+          const diff = packDiff(rawDiff, MAX_DIFF_CHARS);
 
-          Code Diff:
+          const systemPrompt = `You are an expert AI code reviewer that produces reviews in the exact style of CodeRabbit. You are precise, actionable, and never generic. You only flag real issues visible in the diff — never invent problems. Severity levels: 🔴 Critical, 🟠 Major, 🟡 Minor, 🔵 Nitpick.`;
+
+          const userPrompt = `Review this pull request and produce a CodeRabbit-style review.
+
+          PR TITLE: ${process.env.PR_TITLE || "(none)"}
+          PR DESCRIPTION: ${(process.env.PR_BODY || "(none)").slice(0, 1500)}
+
+          CHANGED FILES:
+          ${files}
+
+          DIFF STATS:
+          ${stats}
+
+          Produce your review in EXACTLY this Markdown structure:
+
+          ## 📝 Walkthrough
+
+          A 2-4 sentence high-level summary of what this PR does and why.
+
+          ## 🔄 Changes
+
+          A Markdown table with columns: File | Change Summary. One row per changed file (group similar files, e.g. "src/utils/*.ts").
+
+          ## 📊 Sequence Diagram
+
+          A Mermaid diagram visualizing the most important flow introduced or changed by this PR. Use \`\`\`mermaid fenced block. Prefer sequenceDiagram for request/data flows, flowchart TD for logic/branching changes. Keep it under 15 nodes. If the changes are trivial (docs, config renames), write "No diagram needed for these changes." instead.
+
+          ## 🛡️ Security & Code Quality Findings
+
+          For EACH real issue found, use this format:
+
+          ### [SEVERITY EMOJI] [Severity] — [Short title]
+          **File:** \`path/to/file\` (approximate lines from the diff)
+          **Issue:** What is wrong and why it matters (injection, secrets exposure, race condition, unhandled error, O(n²) hot path, etc.)
+          **Suggestion:**
+          \`\`\`suggestion-style code block showing the FIXED code\`\`\`
+
+          Order findings by severity (Critical first). If there are genuinely no issues, say so briefly — do not fabricate findings.
+
+          ## 🧪 Suggested Tests
+
+          Concrete unit/integration test cases for the changed code: name each test, what it asserts, and which edge case it covers. Include a short code snippet for the 1-2 most important tests in the repository's apparent test framework.
+
+          ## ✅ Review Summary
+
+          One-line verdict: "Approve", "Approve with nits", or "Request changes", plus a count of findings by severity (e.g. 🔴 1 · 🟠 2 · 🟡 3).
+
+          CODE DIFF:
           ${diff}`;
 
-          async function run() {
-            // Send Request to OpenRouter Free Auto-Router Endpoint
-            const reqData = JSON.stringify({
-              model: "openrouter/free",
-              messages: [{ role: "user", content: promptText }]
-            });
-
-            const apiKey = process.env.OPENROUTER_API_KEY;
-            const options = {
-              hostname: "openrouter.ai",
-              path: "/api/v1/chat/completions",
+          async function callOpenRouter(messages) {
+            const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
               method: "POST",
               headers: {
-                "Authorization": `Bearer ${apiKey}`,
+                "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://github.com",
                 "X-Title": "GitHub Actions PR Reviewer",
-                "Content-Length": Buffer.byteLength(reqData)
-              }
-            };
-
-            const responseText = await new Promise((resolve, reject) => {
-              const req = https.request(options, (res) => {
-                let body = "";
-                res.on("data", chunk => body += chunk);
-                res.on("end", () => resolve(body));
-              });
-              req.on("error", reject);
-              req.write(reqData);
-              req.end();
+              },
+              body: JSON.stringify({
+                model: "openrouter/free",
+                temperature: 0.2,
+                max_tokens: 4000,
+                messages,
+              }),
             });
 
-            const parsed = JSON.parse(responseText);
-            const reviewComment = parsed.choices?.[0]?.message?.content || "Unable to generate AI review.";
-
-            // Post Comment directly to GitHub PR
-            const ghData = JSON.stringify({ body: reviewComment });
-            const ghOptions = {
-              hostname: "api.github.com",
-              path: `/repos/${process.env.REPO_NAME}/issues/${process.env.PR_NUMBER}/comments`,
-              method: "POST",
-              headers: {
-                "Authorization": `Bearer ${process.env.GITHUB_TOKEN}`,
-                "User-Agent": "AI-Agent-Action",
-                "Content-Type": "application/json",
-                "Content-Length": Buffer.byteLength(ghData)
-              }
-            };
-
-            const ghReq = https.request(ghOptions, (res) => {
-              res.on("data", () => {});
-              res.on("end", () => console.log("AI Review posted successfully via OpenRouter!"));
-            });
-            ghReq.write(ghData);
-            ghReq.end();
+            if (!res.ok) {
+              const text = await res.text();
+              throw new Error(`OpenRouter HTTP ${res.status}: ${text.slice(0, 500)}`);
+            }
+            const data = await res.json();
+            const content = data.choices?.[0]?.message?.content;
+            if (!content) throw new Error("Empty completion from OpenRouter");
+            return content;
           }
 
-          run().catch(console.error);
-          '
+          // Retry with backoff — free-tier endpoints rate limit often
+          async function withRetry(fn, attempts = 3) {
+            for (let i = 0; i < attempts; i++) {
+              try {
+                return await fn();
+              } catch (err) {
+                if (i === attempts - 1) throw err;
+                const wait = 2000 * Math.pow(2, i);
+                console.log(`Attempt ${i + 1} failed (${err.message}). Retrying in ${wait}ms...`);
+                await new Promise(r => setTimeout(r, wait));
+              }
+            }
+          }
+
+          const review = await withRetry(() =>
+            callOpenRouter([
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userPrompt },
+            ])
+          );
+
+          fs.writeFileSync("review.md", review);
+          console.log("Review generated:", review.length, "chars");
+          EOF
+      - name: Run AI Review
+        if: steps.context.outputs.diff_exists == 'true'
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: node review.mjs
+
+      - name: Post / Update Sticky PR Comment
+        if: steps.context.outputs.diff_exists == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const MARKER = '<!-- ai-multi-agent-pr-reviewer -->';
+
+            let review;
+            try {
+              review = fs.readFileSync('review.md', 'utf8');
+            } catch {
+              core.setFailed('review.md not found — the AI review step likely failed.');
+              return;
+            }
+
+            const shortSha = context.payload.pull_request.head.sha.slice(0, 7);
+            const body = [
+              MARKER,
+              `> 🤖 **AI Multi-Agent Review** · commit \`${shortSha}\` · ${new Date().toISOString()}`,
+              '',
+              review,
+              '',
+              '---',
+              '<sub>Automated review — verify findings before acting. Re-runs on every push.</sub>'
+            ].join('\n');
+
+            // Find our previous comment and update it instead of spamming new ones
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+
+            const existing = comments.find(c => c.body && c.body.includes(MARKER));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+              console.log('Updated existing review comment', existing.id);
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body,
+              });
+              console.log('Created new review comment');
+            }
