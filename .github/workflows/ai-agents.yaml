@@ -90,6 +90,7 @@ jobs:
           // 12K tokens/minute — prompt + completion must fit one TPM window).
           const MAX_DIFF_CHARS = Number(process.env.MAX_DIFF_CHARS || 24000);
           const MAX_PR_BODY_CHARS = 1000;
+          const MAX_PR_TITLE_CHARS = 200;
           const MAX_OUTPUT_TOKENS = 3500;
 
           // Provider failover chain: tried in order; a provider is skipped if
@@ -216,7 +217,7 @@ jobs:
           const userPrompt = `Review this pull request.
 
           <pr_metadata>
-          TITLE: ${process.env.PR_TITLE || "(none)"}
+          TITLE: ${(process.env.PR_TITLE || "(none)").slice(0, MAX_PR_TITLE_CHARS)}
           DESCRIPTION: ${(process.env.PR_BODY || "(none)").slice(0, MAX_PR_BODY_CHARS)}
           CHANGED FILES:
           ${files}
