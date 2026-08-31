@@ -1,0 +1,115 @@
+name: AI Multi-Agent PR Reviewer
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  ai-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Get PR Diff
+        id: get_diff
+        run: |
+          git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt
+          echo "DIFF_EXISTS=$(if [ -s pr_diff.txt ]; then echo 'true'; else echo 'false'; fi)" >> $GITHUB_ENV
+
+      - name: Run OpenRouter Multi-Agent Review
+        if: env.DIFF_EXISTS == 'true'
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO_NAME: ${{ github.repository }}
+        run: |
+          node -e '
+          const fs = require("fs");
+          const https = require("https");
+
+          const diff = fs.readFileSync("pr_diff.txt", "utf8").slice(0, 8000);
+
+          const promptText = `You are a Senior Software Developer acting as a 2-agent review team:
+
+          AGENT 1 (Security & Logic Reviewer): Analyze this code diff for security flaws, bugs, and performance issues.
+          AGENT 2 (Test Engineer): Identify missing edge cases and write unit test suggestions for these changes.
+
+          Format your output strictly in clean Markdown with these headers:
+          ## 🛡️ Agent 1: Security & Code Quality Audit
+          ## 🧪 Agent 2: Suggested Unit Tests
+
+          Code Diff:
+          ${diff}`;
+
+          async function run() {
+            // Send Request to OpenRouter Free Auto-Router Endpoint
+            const reqData = JSON.stringify({
+              model: "openrouter/free",
+              messages: [{ role: "user", content: promptText }]
+            });
+
+            const apiKey = process.env.OPENROUTER_API_KEY;
+            const options = {
+              hostname: "openrouter.ai",
+              path: "/api/v1/chat/completions",
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${apiKey}`,
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com",
+                "X-Title": "GitHub Actions PR Reviewer",
+                "Content-Length": Buffer.byteLength(reqData)
+              }
+            };
+
+            const responseText = await new Promise((resolve, reject) => {
+              const req = https.request(options, (res) => {
+                let body = "";
+                res.on("data", chunk => body += chunk);
+                res.on("end", () => resolve(body));
+              });
+              req.on("error", reject);
+              req.write(reqData);
+              req.end();
+            });
+
+            const parsed = JSON.parse(responseText);
+            const reviewComment = parsed.choices?.[0]?.message?.content || "Unable to generate AI review.";
+
+            // Post Comment directly to GitHub PR
+            const ghData = JSON.stringify({ body: reviewComment });
+            const ghOptions = {
+              hostname: "api.github.com",
+              path: `/repos/${process.env.REPO_NAME}/issues/${process.env.PR_NUMBER}/comments`,
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${process.env.GITHUB_TOKEN}`,
+                "User-Agent": "AI-Agent-Action",
+                "Content-Type": "application/json",
+                "Content-Length": Buffer.byteLength(ghData)
+              }
+            };
+
+            const ghReq = https.request(ghOptions, (res) => {
+              res.on("data", () => {});
+              res.on("end", () => console.log("AI Review posted successfully via OpenRouter!"));
+            });
+            ghReq.write(ghData);
+            ghReq.end();
+          }
+
+          run().catch(console.error);
+          '

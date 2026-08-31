@@ -1,0 +1,20 @@
+{
+  "name": "ai-agent-ci-demo",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mohammedanasa/ai-agent-ci-demo.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/mohammedanasa/ai-agent-ci-demo/issues"
+  },
+  "homepage": "https://github.com/mohammedanasa/ai-agent-ci-demo#readme"
+}
